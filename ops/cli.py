@@ -4,28 +4,24 @@ ops/cli.py
 Single CLI entrypoint for all FinRAG operations.
 
 Commands:
-  finrag ingest   — download SEC filings + build corpus
+  finrag ingest   — download SEC filings from EDGAR
+  finrag corpus   — show corpus definition
   finrag index    — embed chunks + build vector index
   finrag query    — query the RAG system interactively
   finrag eval     — run evaluation harness against gold set
   finrag serve    — start the FastAPI server
-  finrag info     — show current configuration
+  finrag info     — show current configuration + corpus status
 
 Usage (after pip install -e .):
-  finrag --help
-  finrag query "What was Apple's revenue in FY2023?"
   finrag ingest --ticker AAPL --year 2023
-  finrag eval --gold-set data/eval/gold.jsonl
-  finrag serve --port 8000
+  finrag ingest --all
+  finrag query "What was Apple's revenue in FY2023?"
 
-Windows note:
-  All paths use pathlib.Path — no hardcoded Unix separators.
-  Run from the project root where .env lives.
+Windows compatible: all paths use pathlib.Path.
 """
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 from typing import Optional
@@ -35,7 +31,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-# Bootstrap: ensure src/ is on sys.path when running ops/cli.py directly
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -44,8 +39,6 @@ from finrag.core.logging import get_logger, setup_logging
 from finrag.core.tracing import new_trace
 from finrag.domain.policy import FinancialQAPolicy
 from finrag.services.answer import AnswerService
-
-# ── App Setup ─────────────────────────────────────────────────────────────────
 
 app = typer.Typer(
     name="finrag",
@@ -56,8 +49,6 @@ app = typer.Typer(
 console = Console()
 log = get_logger(__name__)
 
-
-# ── Callback: runs before every command ──────────────────────────────────────
 
 @app.callback()
 def _startup(
@@ -71,39 +62,70 @@ def _startup(
     settings.ensure_dirs()
 
 
-# ── Commands ──────────────────────────────────────────────────────────────────
+# ── ingest ────────────────────────────────────────────────────────────────────
 
 @app.command()
 def ingest(
-    ticker: str = typer.Option(..., "--ticker", "-t", help="Stock ticker, e.g. AAPL"),
-    year: int = typer.Option(..., "--year", "-y", help="Fiscal year, e.g. 2023"),
+    ticker: Optional[str] = typer.Option(None, "--ticker", "-t", help="Single ticker e.g. AAPL"),
+    year: Optional[int] = typer.Option(None, "--year", "-y", help="Fiscal year e.g. 2023"),
+    all_corpus: bool = typer.Option(False, "--all", help="Download full Magnificent 7 corpus"),
     force: bool = typer.Option(False, "--force", help="Re-download even if already exists"),
 ) -> None:
     """
-    Download and parse a SEC 10-K filing into structured sections.
+    Download SEC 10-K filings from EDGAR into data/raw/.
 
-    Steps:
-      1. Download HTML filing from EDGAR
-      2. Parse into sections (Item 1, 1A, 7, 8…)
-      3. Chunk sections with stable chunk_ids
-      4. Write to data/processed/
-
-    Example:
-      finrag ingest --ticker AAPL --year 2023
+    Examples:\n
+      finrag ingest --ticker AAPL --year 2023\n
+      finrag ingest --all\n
+      finrag ingest --all --force
     """
-    console.print(
-        Panel(
-            f"[bold cyan]Ingesting[/] {ticker} 10-K ({year})\n"
-            f"[dim]Output → {settings.data_processed_dir}[/]",
-            title="FinRAG Ingest",
-        )
-    )
-    # Day 2: wire EDGAR downloader
-    # Day 3: wire HTML parser
-    # Day 4: wire chunker
-    log.info("ingest.stub", ticker=ticker, year=year)
-    console.print("[yellow]⚠ Ingest pipeline is a stub — will be implemented on Days 2–4.[/]")
+    from finrag.ingest.corpus_config import CORPUS, FilingTarget, summary
+    from finrag.ingest.download_edgar_10k import CorpusDownloader
 
+    if not all_corpus and not (ticker and year):
+        console.print("[red]Error:[/] Provide --ticker + --year, or use --all")
+        raise typer.Exit(1)
+
+    if all_corpus:
+        console.print(Panel(summary(), title="[bold cyan]FinRAG Corpus[/]"))
+        targets = CORPUS
+    else:
+        targets = [FilingTarget(
+            ticker=ticker.upper(),
+            year=year,
+            company_name=ticker.upper(),
+            industry="",
+        )]
+        console.print(Panel(
+            f"[bold cyan]Downloading[/] {ticker.upper()} 10-K ({year})\n"
+            f"[dim]Output → {settings.data_raw_dir}[/]",
+            title="FinRAG Ingest",
+        ))
+
+    downloader = CorpusDownloader(force=force)
+    results = downloader.download_all(targets)
+
+    failed = [r for r in results if r.status == "failed"]
+    if failed:
+        console.print(f"\n[red]⚠ {len(failed)} filing(s) failed — check logs.[/]")
+        raise typer.Exit(1)
+
+
+# ── corpus ────────────────────────────────────────────────────────────────────
+
+@app.command()
+def corpus() -> None:
+    """Show the full corpus definition (all 14 planned filings + demo questions)."""
+    from finrag.ingest.corpus_config import CORPUS, summary
+    console.print(Panel(summary(), title="[bold cyan]Magnificent 7 Corpus[/]"))
+    console.print("\n[bold]Sample demo questions per filing:[/]")
+    for filing in CORPUS:
+        console.print(f"\n  [cyan]{filing.ticker} {filing.year}[/] — {filing.company_name}")
+        for q in filing.demo_questions:
+            console.print(f"    • {q}")
+
+
+# ── index ─────────────────────────────────────────────────────────────────────
 
 @app.command()
 def index(
@@ -112,19 +134,14 @@ def index(
     """
     Embed chunks and build/update the vector index.
 
-    Reads from data/processed/chunks.jsonl
-    Writes to data/index/chroma/
-
-    Example:
-      finrag index
-      finrag index --rebuild
+    Reads from data/processed/chunks.jsonl — Writes to data/index/chroma/
     """
     console.print(Panel("[bold cyan]Building vector index[/]", title="FinRAG Index"))
-    # Day 5: wire SentenceTransformers + Chroma
-    # Day 6: wire BM25 + hierarchical index
     log.info("index.stub")
     console.print("[yellow]⚠ Index pipeline is a stub — will be implemented on Days 5–6.[/]")
 
+
+# ── query ─────────────────────────────────────────────────────────────────────
 
 @app.command()
 def query(
@@ -137,8 +154,8 @@ def query(
     """
     Query the RAG system and display a grounded answer with citations.
 
-    Example:
-      finrag query "What was Apple's revenue in FY2023?"
+    Example:\n
+      finrag query "What was Apple's revenue in FY2023?"\n
       finrag query "What are the main risk factors?" --ticker AAPL --year 2023
     """
     filters = {}
@@ -158,18 +175,14 @@ def query(
         console.print_json(response.model_dump_json(indent=2))
         return
 
-    # ── Pretty output ─────────────────────────────────────────────────────────
     status_color = "red" if response.refusal else "green"
     status_label = "REFUSED" if response.refusal else "ANSWERED"
 
-    console.print(
-        Panel(
-            response.answer_text,
-            title=f"[{status_color}]{status_label}[/] — {question[:60]}",
-            subtitle=f"[dim]{response.model_used} | {elapsed:.0f}ms | "
-                     f"{len(response.citations)} citation(s)[/]",
-        )
-    )
+    console.print(Panel(
+        response.answer_text,
+        title=f"[{status_color}]{status_label}[/] — {question[:60]}",
+        subtitle=f"[dim]{response.model_used} | {elapsed:.0f}ms | {len(response.citations)} citation(s)[/]",
+    ))
 
     if response.refusal and response.safety_notes:
         console.print(f"\n[yellow]Safety note:[/] {response.safety_notes}")
@@ -181,114 +194,100 @@ def query(
         table.add_column("Section", width=15)
         table.add_column("Score", justify="right", width=6)
         table.add_column("Preview", width=40)
-
         for cit in response.citations:
             table.add_row(
                 cit.chunk_id[:28],
                 cit.doc_id,
                 cit.section_id,
                 f"{cit.relevance_score:.2f}",
-                cit.text_preview[:38] + "…" if cit.text_preview else "",
+                (cit.text_preview[:38] + "…") if cit.text_preview else "",
             )
         console.print(table)
 
     console.print(f"\n[dim]request_id: {response.request_id}[/]")
 
 
+# ── eval ──────────────────────────────────────────────────────────────────────
+
 @app.command()
 def eval(
-    gold_set: Path = typer.Option(
-        Path("data/eval/gold.jsonl"),
-        "--gold-set",
-        help="Path to gold evaluation set",
-    ),
-    output: Path = typer.Option(
-        Path("data/eval/results.json"),
-        "--output",
-        help="Where to write evaluation report",
-    ),
+    gold_set: Path = typer.Option(Path("data/eval/gold.jsonl"), "--gold-set"),
+    output: Path = typer.Option(Path("data/eval/results.json"), "--output"),
 ) -> None:
-    """
-    Run the evaluation harness against the gold question set.
-
-    Reports retrieval recall@k, MRR, citation coverage, faithfulness.
-    Used as a quality gate in CI (Day 13).
-
-    Example:
-      finrag eval
-      finrag eval --gold-set data/eval/gold.jsonl --output results.json
-    """
+    """Run the evaluation harness against the gold question set (Day 8)."""
     console.print(Panel("[bold cyan]Running evaluation harness[/]", title="FinRAG Eval"))
-    log.info("eval.stub", gold_set=str(gold_set))
     console.print("[yellow]⚠ Evaluation harness is a stub — will be implemented on Day 8.[/]")
 
+
+# ── serve ─────────────────────────────────────────────────────────────────────
 
 @app.command()
 def serve(
     host: str = typer.Option(settings.api_host, "--host"),
     port: int = typer.Option(settings.api_port, "--port"),
-    reload: bool = typer.Option(False, "--reload", help="Hot reload (dev only)"),
+    reload: bool = typer.Option(False, "--reload"),
 ) -> None:
-    """
-    Start the FastAPI server (implemented on Day 11).
-
-    Example:
-      finrag serve
-      finrag serve --port 8080 --reload
-    """
-    console.print(
-        Panel(
-            f"[bold cyan]Starting API server[/] on {host}:{port}",
-            title="FinRAG Serve",
-        )
-    )
-    log.info("serve.stub")
+    """Start the FastAPI server (Day 11)."""
+    console.print(Panel(
+        f"[bold cyan]Starting API server[/] on {host}:{port}",
+        title="FinRAG Serve",
+    ))
     console.print("[yellow]⚠ FastAPI server is a stub — will be implemented on Day 11.[/]")
-    # Day 11:
-    # import uvicorn
-    # from finrag.api.app import create_app
-    # uvicorn.run(create_app(), host=host, port=port, reload=reload)
 
+
+# ── info ──────────────────────────────────────────────────────────────────────
 
 @app.command()
 def info() -> None:
-    """Show current configuration and system status."""
+    """Show current configuration, corpus download status, and safety policy."""
     setup_logging()
 
     table = Table(title="FinRAG Configuration", show_header=True, header_style="bold blue")
     table.add_column("Setting", style="cyan", width=30)
     table.add_column("Value", width=45)
-    table.add_column("Status", width=10)
+    table.add_column("Status", width=12)
 
     checks = [
-        ("Environment", settings.app_env.value, "✅"),
-        ("LLM Backend", settings.llm_backend.value, "✅"),
-        ("OpenAI Model", settings.openai_model, "✅" if settings.openai_available else "⚠ no key"),
-        ("Embedding Model", settings.embedding_model, "✅"),
-        ("Vector Store", settings.vector_store_backend.value, "✅"),
-        ("Chroma Dir", str(settings.chroma_persist_dir),
-         "✅" if settings.chroma_persist_dir.exists() else "⚠ not built"),
-        ("LlamaParse", "enabled" if settings.llamaparse_enabled else "disabled",
-         "✅" if settings.llamaparse_available else "—"),
-        ("Guardrails", "enabled" if settings.guardrails_enabled else "disabled", "✅"),
-        ("Log Dir", str(settings.app_log_dir), "✅"),
-        ("Top-K", str(settings.retrieval_top_k), "✅"),
-        ("Hybrid Alpha", str(settings.retrieval_hybrid_alpha), "✅"),
+        ("Environment",    settings.app_env.value,            "✅"),
+        ("LLM Backend",    settings.llm_backend.value,        "✅"),
+        ("OpenAI Model",   settings.openai_model,             "✅" if settings.openai_available else "⚠ no key"),
+        ("Embedding Model",settings.embedding_model,          "✅"),
+        ("Vector Store",   settings.vector_store_backend.value,"✅"),
+        ("Chroma Dir",     str(settings.chroma_persist_dir),  "✅" if settings.chroma_persist_dir.exists() else "⚠ not built"),
+        ("Guardrails",     "enabled" if settings.guardrails_enabled else "disabled", "✅"),
+        ("Top-K",          str(settings.retrieval_top_k),     "✅"),
+        ("Hybrid Alpha",   str(settings.retrieval_hybrid_alpha),"✅"),
     ]
-
     for setting, value, status in checks:
         table.add_row(setting, value, status)
-
     console.print(table)
 
-    # Show policy rules
+    # Corpus status
+    from finrag.ingest.download_edgar_10k import load_manifest
+    manifest = load_manifest()
+    if manifest:
+        console.print(f"\n[bold]Corpus:[/] {len(manifest)} filing(s) downloaded")
+        ct = Table(show_header=True, header_style="bold green")
+        ct.add_column("Doc ID", width=35)
+        ct.add_column("Status", width=10)
+        ct.add_column("Size (KB)", justify="right", width=10)
+        ct.add_column("Filed", width=12)
+        for entry in manifest:
+            ct.add_row(
+                entry.get("doc_id", ""),
+                entry.get("status", ""),
+                str(round(entry.get("file_size_kb", 0))),
+                entry.get("filed_date", ""),
+            )
+        console.print(ct)
+    else:
+        console.print("\n[yellow]Corpus:[/] No filings yet. Run: [cyan]finrag ingest --all[/]")
+
     policy = FinancialQAPolicy()
-    console.print(f"\n[bold]Safety Policy[/]: {len(policy._rules)} rules loaded")
+    console.print(f"\n[bold]Safety Policy:[/] {len(policy._rules)} rules loaded")
     for rule in policy._rules:
-        console.print(f"  [cyan]{rule.rule_id}[/] ({rule.severity.value}) — {rule.description[:60]}…")
+        console.print(f"  [cyan]{rule.rule_id}[/] ({rule.severity.value})")
 
-
-# ── Entrypoint ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     app()
