@@ -175,31 +175,31 @@ CORPUS: list[FilingTarget] = [
         ],
     ),
 
-    # ── Meta (Fiscal year ends December 31) ───────────────────────────────
-    FilingTarget(
-        ticker="META",
-        year=2023,
-        company_name="Meta Platforms Inc.",
-        industry="Social Media / Digital Advertising",
-        fiscal_year_label="FY2023",
-        demo_questions=[
-            "What was Meta's total revenue and operating income in 2023?",
-            "How did Meta's Year of Efficiency impact its financials in 2023?",
-            "What were Meta's key risk factors around AI regulation in 2023?",
-        ],
-    ),
-    FilingTarget(
-        ticker="META",
-        year=2024,
-        company_name="Meta Platforms Inc.",
-        industry="Social Media / Digital Advertising",
-        fiscal_year_label="FY2024",
-        demo_questions=[
-            "What was Meta's total revenue in 2024?",
-            "How did Meta describe its AI investments and Llama models in the 2024 10-K?",
-            "What were Meta's capital expenditure plans for AI infrastructure in 2024?",
-        ],
-    ),
+    # # ── Meta (Fiscal year ends December 31) ───────────────────────────────
+    # FilingTarget(
+    #     ticker="META",
+    #     year=2023,
+    #     company_name="Meta Platforms Inc.",
+    #     industry="Social Media / Digital Advertising",
+    #     fiscal_year_label="FY2023",
+    #     demo_questions=[
+    #         "What was Meta's total revenue and operating income in 2023?",
+    #         "How did Meta's Year of Efficiency impact its financials in 2023?",
+    #         "What were Meta's key risk factors around AI regulation in 2023?",
+    #     ],
+    # ),
+    # FilingTarget(
+    #     ticker="META",
+    #     year=2024,
+    #     company_name="Meta Platforms Inc.",
+    #     industry="Social Media / Digital Advertising",
+    #     fiscal_year_label="FY2024",
+    #     demo_questions=[
+    #         "What was Meta's total revenue in 2024?",
+    #         "How did Meta describe its AI investments and Llama models in the 2024 10-K?",
+    #         "What were Meta's capital expenditure plans for AI infrastructure in 2024?",
+    #     ],
+    # ),
 
     # ── Tesla (Fiscal year ends December 31) ──────────────────────────────
     FilingTarget(

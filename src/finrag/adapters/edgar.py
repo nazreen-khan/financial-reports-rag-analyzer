@@ -208,7 +208,7 @@ class EDGARDownloader(EDGARDownloaderBase):
         "GOOGL": "0001652044",
         "AMZN":  "0001018724",
         "NVDA":  "0001045810",
-        "META":  "0001326801",
+        # "META":  "0001326801",
         "TSLA":  "0001318605",
     }
 
@@ -300,51 +300,138 @@ class EDGARDownloader(EDGARDownloaderBase):
         year: int,
     ) -> dict[str, Any] | None:
         """
-        Find the 10-K filing that corresponds to the given fiscal year.
+        Find the 10-K filing that covers fiscal year `year`.
 
-        Strategy: The 10-K for fiscal year Y is filed in early Y+1.
-        We match on filing date year being Y or Y+1,
-        and fiscal year end being in year Y.
+        Key insight: Large companies routinely file through third-party agents
+        (e.g. Edgar Filing Services, EDGAR Online). Their accession numbers
+        start with the AGENT's CIK, not the company's CIK. This is 100% normal.
+        We must NOT filter by accession prefix.
+
+        Matching is purely date-based, using two signals:
+          A) fiscal_year_end (MMDD string from EDGAR) — most reliable
+          B) filed_date — secondary heuristic
+
+        Filing calendar for each FY end type:
+          Dec 31 FY (TSLA, META, GOOGL, AMZN):
+            FY2023 filed Jan-Feb 2024  →  filed_year = year+1, month 1-4
+          Jun 30 FY (MSFT):
+            FY2023 filed Jul-Aug 2023  →  filed_year = year,   month 7-9
+          Sep FY  (AAPL):
+            FY2024 filed Oct-Nov 2024  →  filed_year = year,   month 10-12
+          Jan FY  (NVDA):
+            FY2024 (ends Jan 2024) filed Apr 2024 → filed_year = year, month 4
         """
         filings = self._list_filings(cik, "10-K")
 
         if not filings:
+            log.warning("edgar.filing.none_found", ticker=ticker, cik=cik)
             return None
 
-        # Try to match fiscal year end in target year
-        for filing in filings:
-            filed_date = filing.get("filed_date", "")
-            fiscal_end = filing.get("fiscal_year_end", "")
-
-            if not filed_date:
-                continue
-
-            filed_year = int(filed_date[:4])
-
-            # 10-K for fiscal year Y is typically filed in Y+1 (Jan-April)
-            # Some companies (e.g. AAPL fiscal year ends Sept) file in Oct-Dec of same year
-            if filed_year in (year, year + 1):
-                # Additional check: fiscal year end should be in target year
-                # fiscal_end format is "MMDD" in the submissions API
-                if fiscal_end:
-                    # If fiscal end month is high (Sept-Dec), filing year = target year
-                    month = int(fiscal_end[:2]) if len(fiscal_end) >= 2 else 0
-                    if month >= 9 and filed_year == year:
-                        return filing
-                    elif filed_year == year + 1:
-                        return filing
-                else:
-                    if filed_year == year + 1:
-                        return filing
-
-        # Fallback: return most recent filing if year matching fails
-        log.warning(
-            "edgar.filing.year_match_fallback",
+        log.debug(
+            "edgar.filing.candidates",
             ticker=ticker,
             year=year,
-            available_dates=[f.get("filed_date") for f in filings[:5]],
+            count=len(filings),
+            dates=[f.get("filed_date") for f in filings[:6]],
         )
-        return filings[0] if filings else None
+
+        scored: list[tuple[int, dict[str, Any]]] = []
+
+        for filing in filings:
+            filed_date = filing.get("filed_date", "")
+            fiscal_end  = filing.get("fiscal_year_end", "")   # "MMDD" e.g. "0630"
+            accession   = filing.get("accession", "")
+
+            if not filed_date or not accession:
+                continue
+
+            filed_year  = int(filed_date[:4])
+            filed_month = int(filed_date[5:7])
+            score = 0
+
+            # ── Primary signal: fiscal_year_end ───────────────────────────────
+            if fiscal_end and len(fiscal_end) >= 4:
+                fy_month = int(fiscal_end[:2])   # 1-12
+                fy_day   = int(fiscal_end[2:4])
+
+                # Companies whose FY ends in Jan-Jun file in the SAME calendar year
+                # e.g. MSFT FY ends Jun 30 → files Jul-Sep of same year
+                # e.g. NVDA FY ends Jan 26 → files Apr of same year
+                if fy_month <= 6:
+                    # filed in same calendar year as FY end
+                    if filed_year == year and filed_month > fy_month:
+                        score += 10
+                    # or very early next year (amended filing)
+                    elif filed_year == year + 1 and filed_month <= 3:
+                        score += 7
+
+                # Companies whose FY ends Jul-Sep file in same calendar year (Oct-Dec)
+                # e.g. AAPL FY ends late Sep → files Oct-Nov same year
+                elif fy_month <= 9:
+                    if filed_year == year and filed_month >= fy_month:
+                        score += 10
+                    elif filed_year == year + 1 and filed_month <= 3:
+                        score += 7
+
+                # Companies whose FY ends Oct-Dec file NEXT calendar year (Jan-Apr)
+                # e.g. TSLA/META/GOOGL/AMZN FY ends Dec 31 → files Jan-Feb year+1
+                else:
+                    if filed_year == year + 1 and filed_month <= 4:
+                        score += 10
+                    # Same-year edge case: fiscal year ends in Oct/Nov and
+                    # company files very quickly (rare)
+                    elif filed_year == year and filed_month >= 11:
+                        score += 6
+
+            # ── Secondary signal: filed_date heuristic (no fiscal_end info) ───
+            else:
+                # Without FY end info, use broad window:
+                # FY year Y → filed between Jul Y and Apr Y+1
+                if filed_year == year + 1 and 1 <= filed_month <= 4:
+                    score += 6
+                elif filed_year == year and 7 <= filed_month <= 12:
+                    score += 5
+
+            if score > 0:
+                scored.append((score, filing))
+                log.debug(
+                    "edgar.filing.scored",
+                    ticker=ticker,
+                    accession=accession,
+                    filed_date=filed_date,
+                    fiscal_end=fiscal_end,
+                    score=score,
+                )
+
+        if not scored:
+            # Nothing matched the date window — log all available filings to help debug
+            log.error(
+                "edgar.filing.no_match",
+                ticker=ticker,
+                year=year,
+                cik=cik,
+                available_filings=[
+                    {"filed": f.get("filed_date"), "fiscal_end": f.get("fiscal_year_end")}
+                    for f in filings[:8]
+                ],
+            )
+            return None
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_filing = scored[0]
+
+        log.info(
+            "edgar.filing.selected",
+            ticker=ticker,
+            year=year,
+            accession=best_filing["accession"],
+            filed_date=best_filing["filed_date"],
+            fiscal_end=best_filing.get("fiscal_year_end"),
+            score=best_score,
+            candidates_scored=len(scored),
+        )
+        return best_filing
+
 
     # ── Internal: Document URL Resolution ────────────────────────────────────
 

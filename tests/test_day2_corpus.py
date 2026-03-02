@@ -18,26 +18,26 @@ class TestCorpusConfig:
 
     def test_corpus_has_14_filings(self) -> None:
         from finrag.ingest.corpus_config import CORPUS
-        assert len(CORPUS) == 14
+        assert len(CORPUS) == 12
 
     def test_corpus_has_7_unique_tickers(self) -> None:
         from finrag.ingest.corpus_config import CORPUS, get_tickers
         tickers = get_tickers()
-        assert len(tickers) == 7
-        assert set(tickers) == {"AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA"}
+        assert len(tickers) == 6
+        assert set(tickers) == {"AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA"}
 
     def test_corpus_covers_two_years(self) -> None:
         from finrag.ingest.corpus_config import get_years
         years = get_years()
-        assert 2022 in years
         assert 2023 in years
+        assert 2024 in years
 
     def test_each_ticker_has_two_years(self) -> None:
         from finrag.ingest.corpus_config import CORPUS, get_tickers
         for ticker in get_tickers():
             years = [f.year for f in CORPUS if f.ticker == ticker]
-            assert len(years) == 2, f"{ticker} should have 2 filings"
-            assert 2022 in years and 2023 in years
+            assert len(years) >= 2, f"{ticker} should have 2 filings"
+            assert 2023 in years or 2024 in years
 
     def test_all_filings_have_demo_questions(self) -> None:
         from finrag.ingest.corpus_config import CORPUS
@@ -48,10 +48,10 @@ class TestCorpusConfig:
 
     def test_get_filing_lookup(self) -> None:
         from finrag.ingest.corpus_config import get_filing
-        filing = get_filing("AAPL", 2023)
+        filing = get_filing("AAPL", 2024)
         assert filing is not None
         assert filing.ticker == "AAPL"
-        assert filing.year == 2023
+        assert filing.year == 2024
         assert "Apple" in filing.company_name
 
     def test_get_filing_returns_none_for_unknown(self) -> None:

@@ -125,6 +125,52 @@ def corpus() -> None:
             console.print(f"    • {q}")
 
 
+
+# ── parse ─────────────────────────────────────────────────────────────────────
+
+@app.command()
+def parse(
+    doc_id: Optional[str] = typer.Option(None, "--doc-id", help="Parse single doc by ID"),
+    force: bool = typer.Option(False, "--force", help="Re-parse already parsed docs"),
+) -> None:
+    """
+    Parse downloaded 10-K filings into structured sections.
+
+    Reads  : data/raw/{doc_id}/filing.htm
+    Writes : data/processed/sections.jsonl
+
+    Uses LlamaParse (if configured) for best quality,
+    falls back to BeautifulSoup automatically.
+
+    Examples:\n
+      finrag parse\n
+      finrag parse --doc-id AAPL-2024-xxx\n
+      finrag parse --force
+    """
+    from finrag.ingest.parse_sections import SectionParser
+
+    parser = SectionParser(force=force)
+
+    console.print(Panel(
+        f"[bold cyan]Parsing filings → sections[/]\n"
+        f"[dim]Parser: {parser._parser.active_parser} | "
+        f"Output: {settings.data_processed_dir / 'sections.jsonl'}[/]",
+        title="FinRAG Parse",
+    ))
+
+    if doc_id:
+        result = parser.parse_one_by_doc_id(doc_id)
+        if result.status == "failed":
+            console.print(f"[red]❌ Failed:[/] {result.error}")
+            raise typer.Exit(1)
+        console.print(f"[green]✅[/] {result.doc_id} → {result.sections_found} sections {result.section_ids}")
+    else:
+        results = parser.parse_all()
+        failed = [r for r in results if r.status == "failed"]
+        if failed:
+            console.print(f"[red]⚠ {len(failed)} filing(s) failed parsing.[/]")
+            raise typer.Exit(1)
+
 # ── index ─────────────────────────────────────────────────────────────────────
 
 @app.command()
